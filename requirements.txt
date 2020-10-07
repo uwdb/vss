@@ -1,0 +1,13 @@
+scikit-learn
+opencv-python==4.3.0.38
+opencv-contrib-python
+imagehash
+pillow
+numpy
+seaborn
+pysqlite3
+ffmpeg-python
+ipp
+zstandard
+z3-solver
+psutil

@@ -53,14 +53,15 @@ def main():
     if arguments.mode == 'init':
         Database.clear()
     else:
-        with VFS() as instance:
+        with VFS(transient=True) :
             time.sleep(1)
 
             if arguments.mode == 'start':
                 while True:
                     time.sleep(60)
             elif arguments.mode == 'list':
-                list()
+                for name in list():
+                    print(name)
             elif arguments.mode == 'read':
                 read(arguments.name, arguments.filename,
                      resolution=tuple(map(int, arguments.resolution.split('x'))) if arguments.resolution else None,

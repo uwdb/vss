@@ -1,7 +1,13 @@
-import math
+import logging
+import shutil
+from concurrent.futures import ProcessPoolExecutor, wait
 import os
+
+import cv2
 import numpy as np
 import ffmpeg
+
+from vfs import rawcompression
 
 H264 = "h264"
 HEVC = "hevc"
@@ -15,7 +21,7 @@ extensions = {
 
 DEFAULT_PIXEL_FORMAT = 'yuv420p'
 pixel_formats = {
-    RGB8: "rgb8"
+    RGB8: "rgb24" # packed RGB 8:8:8, 24bpp, RGBRGB (AV_PIX_FMT_RGB24)
 }
 
 bits_per_pixel = {
@@ -28,17 +34,18 @@ encoded = {
     RGB8: False
 }
 encoders = {
-    H264: "nvenc_h264",
-    HEVC: "nvenc_hevc",
+    H264: "libx264", #"nvenc_h264",
+    HEVC: "hevc_nvenc",
     RGB8: "rawvideo"
 }
 decoders = {
-    H264: "h264_cuvid",
-    HEVC: "hevc_cuvid"
+    H264: "h264", #"h264_cuvid",
+    HEVC: "hevc" #"hevc_cuvid"
 }
 
 RAW_VIDEO_MAX_GOP_SIZE = (30*3840*2160*bits_per_pixel[RGB8]) // 8
 
+_pool = ProcessPoolExecutor()
 
 class VideoReader(object):
     def __init__(self, filename, shape, codec, limit=None, loglevel='error'):
@@ -49,7 +56,7 @@ class VideoReader(object):
         if encoded[codec]:
             self._stream = (ffmpeg
                     .input(filename, codec=decoders[codec])  #'h264_cuvid')
-                    .output('pipe:', format='rawvideo', pix_fmt='rgb8', loglevel=loglevel,
+                    .output('pipe:', format='rawvideo', pix_fmt='rgb24', loglevel=loglevel,
                             **dict(vframes=limit) if limit else {})
                     .run_async(pipe_stdout=True))
         else:
@@ -58,7 +65,7 @@ class VideoReader(object):
                                    format='rawvideo',
                                    pix_fmt=pixel_formats.get(codec, None),
                                    s=_size(shape))
-                            .output('pipe:', format='rawvideo', pix_fmt='rgb8', loglevel=loglevel,
+                            .output('pipe:', format='rawvideo', pix_fmt='rgb24', loglevel=loglevel,
                                     **dict(vframes=limit) if limit else {})
                             .run_async(pipe_stdout=True))
 
@@ -81,8 +88,7 @@ class VideoReader(object):
 
     def close(self):
         self._stream.stdout.close()
-        self._stream.wait()
-
+        #self._stream.wait()
 
 class NullReader(object):
     def __enter__(self):
@@ -99,7 +105,7 @@ class VideoWriter(object):
     def __init__(self, filename, shape, codec=H264, loglevel='error'):
         self.shape = shape
         self._stream = (ffmpeg
-            .input('pipe:', format='rawvideo', pix_fmt='rgb8',
+            .input('pipe:', format='rawvideo', pix_fmt='rgb24',
                    s=_size(shape), loglevel=loglevel)
             .output(filename, pix_fmt='yuv420p', codec=encoders[codec]) #'nvenc_h264')
             .overwrite_output()
@@ -117,7 +123,6 @@ class VideoWriter(object):
     def close(self):
         self._stream.stdin.close()
         self._stream.wait()
-
 
 class NullWriter(object):
     def __enter__(self):
@@ -142,6 +147,21 @@ def _psnr_to_mse(psnr):
 def _get_psnr_from_stderr(stderr):
     return float(str(stderr[1]).split('\\n')[-2].split('max:')[-1])
 
+
+def _write_region(input_filename, output_filename, size, offset):
+    with open(output_filename, "wb") as output:
+        output.seek(offset, os.SEEK_SET)
+        if not rawcompression.is_compressed(input_filename):
+            with open(input_filename, 'rb') as input:
+                shutil.copyfileobj(input, output, length=1024 * 1024)
+        else:
+            bytes_read, bytes_written = rawcompression.decompress_file(input_filename, output)
+            assert (bytes_written == size)
+
+def read_first_frame(filename):
+    success, frame = cv2.VideoCapture(filename).read()
+    return frame if success else None
+
 def split_video(source_filename, output_filename_template, resolution, codec, fps, loglevel='error'):
     if encoded[codec]:
         return split_encoded_video(source_filename, output_filename_template, codec, loglevel)
@@ -153,7 +173,7 @@ def split_encoded_video(source_filename, output_filename_template, codec=None, l
     stream = (ffmpeg
      .input(source_filename, codec=decoders[codec])
      .output(output_filename_template, format='segment', segment_list='pipe:', segment_list_type='csv',
-             segment_time=1, vcodec='copy', loglevel=loglevel)
+             segment_time=1, vcodec='copy', hide_banner=None, nostats=None, loglevel=loglevel)
      .run_async(pipe_stdout=True))
 
 #    return (os.path.join(path, filename)
@@ -175,7 +195,7 @@ def split_raw_video(source_filename, output_filename_template, resolution, codec
              segment_time=segment_time,
              segment_list_type='csv',
              vcodec='copy',
-             loglevel=loglevel)
+             hide_banner=None, nostats=None, loglevel=loglevel)
      .run_async(pipe_stdout=True))
 
     return ((os.path.join(path, filename), float(start_time), float(end_time))
@@ -183,11 +203,11 @@ def split_raw_video(source_filename, output_filename_template, resolution, codec
             in map(lambda row: row.split(','),
                    stream.stdout.raw.readall().decode('utf-8').strip().split('\n')))
 
-def join_video(input_filenames, output_filename, resolution, codec, loglevel='error'):
+def join_video(input_filenames, output_filename, resolution, codec, input_sizes=None, loglevel='error'):
     if encoded[codec]:
         join_encoded(input_filenames, output_filename, loglevel=loglevel)
     else:
-        join_raw(input_filenames, output_filename, resolution, codec, loglevel=loglevel)
+        join_raw(input_filenames, output_filename, resolution, codec, input_sizes=input_sizes, loglevel=loglevel)
 
 def join_encoded(input_filenames, output_filename, loglevel='error'):
     (ffmpeg
@@ -196,72 +216,130 @@ def join_encoded(input_filenames, output_filename, loglevel='error'):
       .overwrite_output()
       .run())
 
-def join_raw(input_filenames, output_filename, resolution, codec, loglevel='error'):
-    (ffmpeg
-      .input('concat:{}'.format('|'.join(input_filenames)),
-             s=_size(resolution),
-             pix_fmt=pixel_formats[codec])
-      .output(output_filename, c='copy', loglevel=loglevel)
-      .overwrite_output()
-      .run())
+def join_raw(input_filenames, output_filename, resolution, codec, input_sizes=None, verify_inputs=False, loglevel='error'):
+    if verify_inputs:
+        # Attempting to concat a compressed input file
+        assert(all(not rawcompression.is_compressed(filename) for filename in input_filenames))
+
+        (ffmpeg
+          .input('concat:{}'.format('|'.join(input_filenames)),
+                 s=_size(resolution),
+                 pix_fmt=pixel_formats[codec])
+          .output(output_filename, c='copy', loglevel=loglevel)
+          .overwrite_output()
+          .run())
+    elif input_sizes is None:
+        # Don't verify inputs, just concat everything
+        with open(output_filename, 'wb') as output:
+            for filename in input_filenames:
+                if not rawcompression.is_compressed(filename):
+                    with open(filename, 'rb') as input:
+                        shutil.copyfileobj(input, output)
+                else:
+                    rawcompression.decompress_file(filename, output)
+    else:
+        # Use multiple threads to write to same file
+        assert(len(input_filenames) == len(input_sizes))
+
+        futures = []
+
+        for i, (filename, size) in enumerate(zip(input_filenames, input_sizes)):
+            futures.append(_pool.submit(_write_region, filename, output_filename, size, sum(input_sizes[:i])))
+        wait(futures)
+        assert(all(f.result() is None for f in futures))
 
 def reformat(input_filename, output_filename, output_resolution, output_codec, output_fps,
              input_resolution=None, input_codec=None, input_fps=None, roi=None, times=None, loglevel='error'):
     if encoded[input_codec]:
         return reformat_encoded(input_filename, output_filename,
-                                input_resolution, input_fps, output_resolution, output_codec, roi, times, output_fps, loglevel=loglevel)
+                                input_resolution, input_fps, input_codec, output_resolution, output_codec, roi, times, output_fps, loglevel=loglevel)
+    elif not encoded[output_codec] and times is not None and np.isclose(times[0] + 1/input_fps, times[1]) and \
+            roi is not None and output_resolution == (roi[2] - roi[0], roi[3] - roi[1]):
+        reformat_raw_subframe(input_filename, output_filename, input_resolution, roi)
     else:
         return reformat_raw(input_filename, output_filename, input_resolution, input_fps, output_resolution,
                             input_codec, output_codec, roi, times, output_fps, loglevel=loglevel)
 
-def reformat_encoded(input_filename, output_filename, input_resolution, input_fps, output_resolution, codec, roi, times,
+def reformat_encoded(input_filename, output_filename, input_resolution, input_fps, input_codec, output_resolution, output_codec, roi, times,
+                     output_fps, loglevel='error'):
+    # Need to enable keyframe interval
+    if input_resolution == output_resolution and input_codec == output_codec and input_fps == output_fps and roi is None and times is None:
+        return reformat_encoded_homomorphic(input_filename, output_filename, times, loglevel)
+    else:
+        return reformat_encoded_transcode(input_filename, output_filename, input_resolution, input_fps, input_codec, output_resolution, output_codec, roi, times, output_fps, loglevel)
+
+def reformat_encoded_homomorphic(input_filename, output_filename, times, loglevel='error'):
+    assert(times is None or times[1] - times[0] > 0)
+
+    input_kwargs = {'ss': times[0]} if times else {}
+
+    (ffmpeg
+        .input(input_filename, **input_kwargs)
+        .output(output_filename, c='copy', loglevel=loglevel)
+        #.output(output_filename, t=(times[1] - times[0]) if times else 999999, c='copy', loglevel=loglevel)
+        #.output(output_filename, c='copy', ss=times[0] if times else 0, to=times[1] if times else 999999999, loglevel=loglevel)
+        .overwrite_output()
+        .run())
+    return 0
+
+def reformat_encoded_transcode(input_filename, output_filename, input_resolution, input_fps, input_codec, output_resolution, output_codec, roi, times,
                      output_fps, loglevel='error'):
     assert(times is None or times[1] - times[0] > 0)
 
     if not output_fps:
         output_fps = input_fps
 
-    op = ffmpeg.input(input_filename, r=input_fps, codec=decoders[codec])
+    input_kwargs = {'ss': times[0]} if times else {}
+
+    op = ffmpeg.input(input_filename, r=input_fps, codec=decoders[input_codec], **input_kwargs)
 
     if roi is not None and roi != (0, 0, *input_resolution): #*output_resolution):
         op = op.crop(*_crop(roi))
     if input_resolution != output_resolution:
         op = op.filter('scale', output_resolution[1], output_resolution[0])
 
-    if times:
+#    if times:
+#        (op
+#            .output(output_filename, codec=encoders[output_codec], to=times[1] - times[0], r=output_fps, loglevel=loglevel)
+#            #.output(output_filename, codec=encoders[output_codec], ss=times[0], to=times[1], r=output_fps, loglevel=loglevel)
+#            .overwrite_output()
+#            .run())
+#        return 0
+#    else:
+    if encoded[output_codec]:
         (op
-            .output(output_filename, codec=encoders[codec], ss=times[0], to=times[1], r=output_fps, loglevel=loglevel)
+            .output(output_filename, t=(times[1] - times[0]) if times else 999999, codec=encoders[output_codec], r=output_fps, loglevel=loglevel)
+            .overwrite_output()
             .run())
-        return 0
     else:
         (op
-            .output(output_filename, codec=encoders[codec], r=output_fps, loglevel=loglevel)
+            .output(output_filename, t=(times[1] - times[0]) if times else 999999, pix_fmt=pixel_formats[output_codec], codec=encoders[output_codec], r=output_fps, loglevel=loglevel)
+            .overwrite_output()
             .run())
-        return 0
+
+    if os.path.getsize(output_filename) == 0:
+        logging.error("Caching zero-sized GOP")
+        assert False
+
+    return 0
 
 def reformat_raw(input_filename, output_filename, input_resolution, input_fps, output_resolution, input_codec, output_codec, roi,
                  times, output_fps, loglevel='error'):
     if not output_fps:
         output_fps = input_fps
 
-    if times is not None:
-        op = ffmpeg.input(input_filename,
-                    format='rawvideo',
-                    pix_fmt=pixel_formats[input_codec],
-                    s=_size(input_resolution),
-                    ss=times[0],
-                    to=times[1],
-                    r=input_fps)
-    else:
-        op = ffmpeg.input(input_filename,
-                    format='rawvideo',
-                    pix_fmt=pixel_formats[input_codec],
-                    s=_size(input_resolution),
-                    r=input_fps)
+    input_kwargs = {'ss': times[0]} if times else {}
+
+    op = ffmpeg.input(input_filename,
+                format='rawvideo',
+                pix_fmt=pixel_formats[input_codec],
+                s=_size(input_resolution),
+                r=input_fps,
+                **input_kwargs)
 
     if roi is not None and roi != (0, 0, *input_resolution): #*output_resolution):
         op = op.crop(*_crop(roi))
-    if input_resolution != output_resolution or input_fps != output_fps:
+    if (input_resolution != output_resolution and (roi is None or output_resolution != (roi[2] - roi[0], roi[3] - roi[1]))) or input_fps != output_fps:
         pretransform = op.split() #.filter_multi_output('split')
 
         if input_resolution != output_resolution:
@@ -276,16 +354,16 @@ def reformat_raw(input_filename, output_filename, input_resolution, input_fps, o
             if roi is not None:
                 error = error.filter('scale', roi[3] - roi[1], roi[2] - roi[0])
             else:
-                error = error.filter('scale', input_resolution)
+                error = error.filter('scale', input_resolution[1], input_resolution[0])
         if input_fps != output_fps:
             error = error.filter('fps', input_fps)
 
         error = ffmpeg.filter([pretransform[1], error], 'psnr')
 
         if output_codec in pixel_formats:
-            result_out = posttransform[0].output(output_filename, codec=encoders[output_codec], pix_fmt=pixel_formats[output_codec])
+            result_out = posttransform[0].output(output_filename, t=(times[1] - times[0]) if times else 999999, codec=encoders[output_codec], pix_fmt=pixel_formats[output_codec])
         else:
-            result_out = posttransform[0].output(output_filename, codec=encoders[output_codec], pix_fmt=DEFAULT_PIXEL_FORMAT)
+            result_out = posttransform[0].output(output_filename, t=(times[1] - times[0]) if times else 999999,codec=encoders[output_codec], pix_fmt=DEFAULT_PIXEL_FORMAT)
         error_out = error.output('-', f='null', codec=encoders[output_codec], hide_banner=None, nostats=None) #, loglevel=loglevel)
 
         stderr = ffmpeg.run([result_out, error_out], capture_stderr=True)
@@ -296,6 +374,15 @@ def reformat_raw(input_filename, output_filename, input_resolution, input_fps, o
              .output(output_filename, codec=encoders[output_codec], r=output_fps, loglevel=loglevel)
              .run())
         return 0
+
+def reformat_raw_subframe(input_filename, output_filename, input_resolution, roi):
+    frame = np.fromfile(input_filename, np.uint8, int(np.prod(input_resolution) * 3)).reshape(input_resolution[0], input_resolution[1], 3)
+    subframe = frame[roi[0]:roi[2], roi[1]:roi[3]]
+
+    with open(output_filename, 'wb') as out:
+        out.write(subframe.tobytes())
+
+    return 0
 
 def get_shape(filename):
     probe = ffmpeg.probe(filename)

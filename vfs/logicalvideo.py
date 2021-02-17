@@ -44,11 +44,15 @@ class LogicalVideo(object):
         self.name = name
         self._budget = None
         self._duration = None
+        self._videos = None
+        self._physical_constraints = None
 
     def videos(self):
-        return map(lambda args: PhysicalVideo(*args),
-                   VFS.instance().database.execute(
-                       'SELECT id, logical_id, height, width, codec FROM physical_videos WHERE logical_id = ?', self.id).fetchall())
+        if self._videos is None:
+            self._videos = list(map(lambda args: PhysicalVideo(*args),
+                       VFS.instance().database.execute(
+                           'SELECT id, logical_id, height, width, codec FROM physical_videos WHERE logical_id = ?', self.id).fetchall()))
+        return self._videos
 
     def duration(self):
         if self._duration is None:
@@ -70,3 +74,21 @@ class LogicalVideo(object):
         VFS.instance().database.execute('UPDATE logical_videos SET budget = ? WHERE id = ?', (value, self.id))
         self._budget = value
         logging.debug('Logical video %s has budget %dMB', self.name, value // (1000*1000))
+
+"""
+    def get_physical_constraints(self, resolution, t):
+        if (resolution, t) in self._physical_constraints is None:
+            self._physical_constraints = VFS.instance().database.execute(
+            'SELECT physical_videos.id, MIN(start_time), MAX(end_time), codec, height, width, SUM(size), MAX(fps) '
+            'FROM gops, physical_videos '
+            'WHERE logical_id = ? AND '
+            '      height >= ? AND width >= ? AND '
+            '      start_time < ? AND end_time >= ? AND '
+            '      gops.physical_id = physical_videos.id '
+            'GROUP BY physical_videos.id',
+                (self.id,
+                resolution[0], resolution[1],
+                t[1] if t is not None else 9999999,
+                t[0] if t is not None else -1)).fetchall()
+        return self._physical_constraints
+"""

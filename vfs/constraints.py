@@ -8,9 +8,20 @@ from vfs.videoio import encoded
 # import random
 
 
-KEYFRAME_COST = 5
-NON_KEYFRAME_COST = 1
+#KEYFRAME_COST = 5
+#NON_KEYFRAME_COST = 1
 GOP_SIZE = 30
+
+def keyframe_cost(codec, resolution):
+    # Vbench curves
+    return resolution[0] * resolution[1] * (1.1 if codec == 'hevc' else 1)
+
+def non_keyframe_cost(codec, resolution):
+    return int(resolution[0] * resolution[1] * 1.1) * (1.1 if codec == 'hevc' else 1)
+
+def estimate_encode_cost(codec, resolution):
+    # Vbench curves
+    return resolution[0] * resolution[1] * 1.1 * (1.1 if codec == 'hevc' else 1)
 
 class Interval(object):
     def __init__(self, start, end):
@@ -32,9 +43,10 @@ class GOP(object):
 
 
 class Fragment(object):
-    def __init__(self, interval: Interval, target, _id):
+    def __init__(self, interval: Interval, target, resolution, _id):
         self.interval = interval
         self.target = target
+        self.resolution = resolution
         self.id = _id
 
 class DecodeDependencies:
@@ -134,6 +146,7 @@ def build_from_video_info(video_videos, video_fragments, goal_fragment):
         stop = video['end']
         vid_format = video['format']
         video_id = video['id']
+        video_resolution = video['resolution']
 
         start_frame = to_frames(start)
         stop_frame = to_frames(stop) - 1
@@ -144,7 +157,7 @@ def build_from_video_info(video_videos, video_fragments, goal_fragment):
         else:
             gops = [GOP(Interval(start, min(start + GOP_SIZE - 1, stop_frame)), vid_format)
                     for start in range(start_frame, stop_frame, GOP_SIZE)]
-        fragments = [Fragment(Interval(to_frames(sub_fragment['start']), to_frames(sub_fragment['end'])-1), vid_format, sub_fragment['id'])
+        fragments = [Fragment(Interval(to_frames(sub_fragment['start']), to_frames(sub_fragment['end'])-1), vid_format, video_resolution, sub_fragment['id'])
                      for sub_fragment in video_to_fragment_info[video_id]]
 
         videos.append(Video(gops, fragments, video_id))
@@ -155,11 +168,11 @@ def build_from_video_info(video_videos, video_fragments, goal_fragment):
 
 
 def is_raw(target):
-    return encoded[target]
+    return not encoded[target]
     #return target > 2
 
 
-def find_best_intervals(videos: List[Video], goal_intervals: List[Interval], target):
+def find_best_intervals(videos: List[Video], goal_intervals: List[Interval], target_codec, target_resolution):
     # For each GOP, find the intervals that are from the same video and cross that GOP.
     # For each goal fragment, create a boolean variable.
     opt = z3.Optimize()
@@ -204,8 +217,8 @@ def find_best_intervals(videos: List[Video], goal_intervals: List[Interval], tar
             opt.add(cover_vars[i] == pick_one)
         else:
             # Shouldn't really happen, but useful for checking logic.
-            assert False
-            opt.add(cover_vars[i] == z3.BoolVal(False))
+            assert False, "This usually happens for a request outside of a logical video's duration"
+            #opt.add(cover_vars[i] == z3.BoolVal(False))
 
     # Add encode cost for each fragment that is used.
     # If the fragment's target == goal target, then encode cost is 0.
@@ -218,12 +231,12 @@ def find_best_intervals(videos: List[Video], goal_intervals: List[Interval], tar
         for f, fragment in enumerate(video.fragments):
             encode_cost = z3.Int(f'encode-cost-{v}-{f}')
             opt.add(encode_cost >= 0)
-            if fragment.target == target:
+            if fragment.target == target_codec and fragment.resolution == target_resolution:
                 encode_cost = z3.IntVal(0)
             else:
                 # There is no lookback cost associated with encoding because it assumes the starting point is raw.
                 # should_add_penalty_for_encoding_raw_frame = fragment.interval.length() == 1 and is_raw(fragment.target)
-                encode_cost = video_fragment_indicators[v][f] * fragment.interval.length()
+                encode_cost = video_fragment_indicators[v][f] * fragment.interval.length() * estimate_encode_cost(target_codec, target_resolution)
             fragment_encode_costs.append(encode_cost)
         video_fragment_encode_costs.append(fragment_encode_costs)
 
@@ -236,11 +249,11 @@ def find_best_intervals(videos: List[Video], goal_intervals: List[Interval], tar
         fragment_decode_costs = []
         for f, fragment in enumerate(video.fragments):
             fragment_decode_cost = z3.Int(f'fragment-decode-cost-{v}-{f}')
-            if is_raw(fragment.target) or fragment.target == target:
+            if is_raw(fragment.target) or (fragment.target == target_codec and fragment.resolution == target_resolution):
                 fragment_decode_cost = z3.IntVal(0)
             else:
-                fragment_decode_cost = video_fragment_indicators[v][f] *\
-                                       (video.fragment_decode_dependencies[f].num_p_frames * NON_KEYFRAME_COST + video.fragment_decode_dependencies[f].num_keyframes * KEYFRAME_COST)
+                decode_cost = video.fragment_decode_dependencies[f].num_p_frames * non_keyframe_cost(target_codec, target_resolution) + video.fragment_decode_dependencies[f].num_keyframes * keyframe_cost(target_codec, target_resolution)
+                fragment_decode_cost = video_fragment_indicators[v][f] * decode_cost
             fragment_decode_costs.append(fragment_decode_cost)
 
         video_decode_and_lookback_costs.append(fragment_decode_costs)
@@ -251,7 +264,7 @@ def find_best_intervals(videos: List[Video], goal_intervals: List[Interval], tar
             if is_raw(video.gops[gop_idx].target):
                 # If the GOP is raw, then there is no decode or lookback cost.
                 continue
-            elif video.gops[gop_idx].target != target:
+            elif video.gops[gop_idx].target != target_codec:
                 # If the GOPs target doesn't equal the goal target, then we will have to decode as much as necessary for
                 # any fragments that are picked and partially lie in this GOP.
                 # Start by looking at the furthest fragments, then work towards the ones at the start of the GOP.
@@ -265,7 +278,7 @@ def find_best_intervals(videos: List[Video], goal_intervals: List[Interval], tar
                     associated_gop = video.gops[gop_idx]
                     num_p_frames_to_decode = min(associated_fragment.interval.end, associated_gop.interval.end) - associated_gop.interval.start
                     # TODO: Update to use actual cost.
-                    cost = num_p_frames_to_decode * NON_KEYFRAME_COST + 1 * KEYFRAME_COST
+                    cost = num_p_frames_to_decode * non_keyframe_cost(target_codec, target_resolution) + 1 * keyframe_cost(target_codec, target_resolution)
 
                     fragment_cost = z3.If(z3.And(not_later_fragments, video_fragment_indicators[v][f_idx] > 0), cost, 0)
 
@@ -288,7 +301,7 @@ def find_best_intervals(videos: List[Video], goal_intervals: List[Interval], tar
                     if associated_fragment.interval.start > associated_gop.interval.start:
                         num_leading_p_frames = associated_fragment.interval.start - associated_gop.interval.start
                         # TODO: Update to use actual cost.
-                        cost = num_leading_p_frames * NON_KEYFRAME_COST + 1 * KEYFRAME_COST
+                        cost = num_leading_p_frames * non_keyframe_cost(target_codec, target_resolution) + 1 * keyframe_cost(target_codec, target_resolution)
 
                         # I think this should actually be the cost of all of the frames not in fragments but before and
                         # between included fragments.
@@ -300,6 +313,20 @@ def find_best_intervals(videos: List[Video], goal_intervals: List[Interval], tar
                 lookback_cost = z3.Sum(lookback_costs)
                 gop_decode_costs.append(lookback_cost)
         video_decode_and_lookback_costs.append(gop_decode_costs)
+
+        """
+        # Seek costs for all fragments (not just partial ones)
+        seek_costs = []
+        not_later_fragments = z3.And()
+        video.fragments.sort(key=lambda f: f.id, reverse=True)
+        for index, fragment in enumerate(video.fragments):
+            seek_cost = z3.If(z3.And(not_later_fragments, video_fragment_indicators[v][index] > 0),
+                              sum(g.interval.end - g.interval.start for g in video.gops if g.interval.end <= fragment.interval.start), 0)
+            not_later_fragments = z3.And(not_later_fragments, video_fragment_indicators[v][index] < 1)
+            seek_costs.append(seek_cost)
+        #total_seek_cost = z3.Sum(seek_costs)
+        video_decode_and_lookback_costs.append(seek_costs)
+        """
 
     flat = list(itertools.chain.from_iterable(video_fragment_encode_costs + video_decode_and_lookback_costs))
     opt.minimize(z3.Sum(flat))

@@ -1,8 +1,8 @@
 import os
-import tempfile
 import logging
 from vfs.engine import VFS
-from vfs.videoio import get_shape, get_shape_and_codec, split_video, join_video, extensions
+from vfs.videoio import get_shape, get_shape_and_codec, split_video, join_video, extensions, encoded
+
 
 class PhysicalVideo(object):
     CHANNELS = 3
@@ -25,7 +25,8 @@ class PhysicalVideo(object):
 
     @classmethod
     def _gop_filename_template(cls, logical, physical, gop_id):
-        return '{}-{}-{}.{}'.format(logical.name, physical.id, gop_id, extensions[physical.codec])
+        container = '.mp4' if encoded[physical.codec] else ''
+        return '{}-{}-{}.{}{}'.format(logical.name, physical.id, gop_id, extensions[physical.codec], container)
 
     @classmethod
     def load(cls, logical_video, filename, resolution=None, codec=None, fps=None):
@@ -114,6 +115,7 @@ class PhysicalVideo(object):
         self._logical = None
         self._start_time = None
         self._end_time = None
+        self._gops = None
 
     def logical(self):
         from vfs.logicalvideo import LogicalVideo
@@ -123,11 +125,14 @@ class PhysicalVideo(object):
 
     def gops(self):
         from vfs.gop import Gop
-        return map(lambda args: Gop(*args),
-                   VFS.instance().database.execute(
-                       'SELECT id, physical_id, filename, start_time, end_time, cluster_id, joint, examined, '
-                       '       histogram, descriptors, keypoints, size, zstandard, fps, mse, estimated_mse, parent_id '
-                       'FROM gops WHERE physical_id = ? ORDER BY id', self.id).fetchall())
+
+        if self._gops is None:
+            self._gops = list(map(lambda args: Gop(*args),
+                       VFS.instance().database.execute(
+                           'SELECT id, physical_id, filename, start_time, end_time, cluster_id, joint, examined, '
+                           '       histogram, descriptors, keypoints, size, zstandard, fps, mse, estimated_mse, parent_id, original_size '
+                           'FROM gops WHERE physical_id = ? ORDER BY id', self.id).fetchall()))
+        return self._gops
 
     def start_time(self):
         if self._start_time is None:

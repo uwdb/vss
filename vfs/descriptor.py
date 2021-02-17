@@ -1,30 +1,52 @@
+from itertools import islice
 from collections import defaultdict
 from itertools import groupby
 import logging
 import numpy as np
 import cv2
+
 from vfs.engine import VFS
-#from vfs.gop import Gop
+from vfs.utilities import log_runtime
+
 
 class Descriptor(object):
     FLANN_INDEX_LSH = 6
     FLANN_INDEX_KDTREE = 0
-    DEFAULT_MATCHES_REQUIRED = 20
+    DEFAULT_MATCHES_REQUIRED = 10 #20
     LOWE_THRESHOLD = 0.7
 
     _matchers = {}
+    _feature_fast = cv2.ORB_create()
+    _feature_slow = cv2.ORB_create() #1000)
 
     @classmethod
-    def create(cls, frame):
+    def create(cls, frame, fast=False):
         #logging.info('Adding descriptor')
 
-        orb = cv2.ORB_create()
-        keypoints, descriptors = orb.detectAndCompute(frame, None)
+        #orb = cv2.ORB_create()
+        if not fast:
+            keypoints, descriptors = cls._feature_fast.detectAndCompute(frame, None)
+        else:
+            keypoints, descriptors = cls._feature_slow.detectAndCompute(frame, None)
 
-        return np.float32([keypoint.pt for keypoint in keypoints]).reshape(-1,1,2), descriptors.astype(np.float32)
+        return np.float32([keypoint.pt for keypoint in keypoints]).reshape(-1,1,2), descriptors #.astype(np.float32)
 
     @classmethod
     def closest_match(cls, epoch, gop, matches_required=DEFAULT_MATCHES_REQUIRED, radius=400): #400):
+        from vfs.gop import Gop
+
+        with log_runtime("Joint compression candidate selection"):
+            cluster_gops = VFS.instance().database.execute("SELECT id, filename, descriptors FROM gops WHERE cluster_id = ? AND physical_id != ? AND descriptors IS NOT NULL AND joint = 0 AND examined <= ? AND NOT EXISTS (SELECT id FROM gop_joint_aborted WHERE gop1 = ? AND gop2 = id)", (gop.cluster_id, gop.physical_id, epoch, gop.id)).fetchall()
+            candidate_gops = []
+            for gop2_id, gop2_filename, gop2_descriptors in cluster_gops:
+                success, matches = cls.adhoc_match(gop.descriptors, gop2_descriptors)
+                if success and len(matches) > matches_required:
+                    candidate_gops.append((gop.filename.split('-')[-1] == gop2_filename.split('-')[-1], len(matches), gop2_id, matches))
+                    if candidate_gops[-1][1] > 400 or candidate_gops[-1][0]: # Break on "good enough" match to try out
+                        break
+            candidate_gop = sorted(candidate_gops, reverse=True)[0] if candidate_gops else None
+            return [(candidate_gop[2], candidate_gop[3])]
+
         matcher = cls._get_matcher(epoch, gop)
         physical_map = cls._get_physical_map(gop.cluster_id).get(gop.physical_id, None)
         index_map = cls._get_index_map(gop.cluster_id)
@@ -34,20 +56,28 @@ class Descriptor(object):
         complete = set()
 
         # For each frame/descriptor pair, find matches that pass the Lowe threshold test
-        for descriptor_matches in all_matches:
-            for match in descriptor_matches:
-                if match.imgIdx not in physical_map and \
-                    index_map[match.imgIdx] > gop.id and \
-                    not (match.imgIdx, match.queryIdx) in complete:
-                    # First match
-                    if (match.imgIdx, match.queryIdx) not in first_matches:
-                        first_matches[match.imgIdx, match.queryIdx] = match
-                    # Second match
-                    else:
-                        if first_matches[match.imgIdx, match.queryIdx].distance < cls.LOWE_THRESHOLD * match.distance:
-                            good_matches[match.imgIdx].append(first_matches[match.imgIdx, match.queryIdx])
-                        del first_matches[match.imgIdx, match.queryIdx]
-                        complete.add((match.imgIdx, match.queryIdx))
+        #all_matches = all_matches[:5000]
+        filtered_matches = (m for d in all_matches
+                            for m in d
+                            if index_map[m.imgIdx] > gop.id and
+                               m.imgIdx not in physical_map and
+                               not (m.imgIdx, m.queryIdx) in complete)
+        #for descriptor_matches in all_matches:
+        #    for match in descriptor_matches:
+        with log_runtime("Lowes test"):
+            for match in filtered_matches:
+                #if match.imgIdx not in physical_map and \
+                #    index_map[match.imgIdx] > gop.id and \
+                #if not (match.imgIdx, match.queryIdx) in complete:
+                # First match
+                if (match.imgIdx, match.queryIdx) not in first_matches:
+                    first_matches[match.imgIdx, match.queryIdx] = match
+                # Second match
+                else:
+                    if first_matches[match.imgIdx, match.queryIdx].distance < cls.LOWE_THRESHOLD * match.distance:
+                        good_matches[match.imgIdx].append(first_matches[match.imgIdx, match.queryIdx])
+                    del first_matches[match.imgIdx, match.queryIdx]
+                    complete.add((match.imgIdx, match.queryIdx))
 
         # Some matches may not have a second match to apply Lowe's threshold on.
         # Check to see if we should have seen it and count it if so.
@@ -55,13 +85,21 @@ class Descriptor(object):
             if first_match.distance / cls.LOWE_THRESHOLD < radius:
                 good_matches[first_match.imgIdx].append(first_match)
 
-        best_indexes = [index for index, matches in good_matches.items() if len(matches) >= matches_required]
-        best_ids = [index_map[index] for index in best_indexes]
-        best_id = VFS.instance().database.execute(
-            'SELECT MIN(id) FROM gops WHERE joint=0 AND id in ({})'.format(','.join(map(str, best_ids)))).fetchone()[0]
+        ignore_ids = set(VFS.instance().database.execute('SELECT gop2 FROM gop_joint_aborted WHERE gop1 = ?', gop.id).fetchall())
+        best_indexes = [index for index, matches in good_matches.items() if len(matches) >= matches_required and index_map[index] not in ignore_ids]
+        #best_ids = [index_map[index] for index in best_indexes if index_map[index] not in ignore_ids]
+        #best_id = VFS.instance().database.execute(
+        #    'SELECT MIN(id) FROM gops WHERE joint=0 AND id in ({})'.format(','.join(map(str, best_ids)))).fetchone()[0]
         #best_index = max((index for index, matches in good_matches.items() if len(matches) >= matches_required),
         #                 default=None)
-        best = sorted([(index_map[index], good_matches[index]) for index in best_indexes], key=lambda pair: len(pair[1]), reverse=True)
+        #best = sorted([(index_map[index], good_matches[index]) for index in best_indexes], key=lambda pair: len(pair[1]), reverse=True)
+        gops = Gop.get_all(index_map[index] for index in best_indexes)
+        best = [(gop, good_matches[index]) for gop, index in zip(gops, best_indexes)]
+        best = sorted(best, key=lambda pair: (pair[0].filename.split('-')[-1] == gop.filename.split('-')[-1], len(pair[1])), reverse=True)
+        best = best[:len(best)//20 + 1] # Keep top 5%
+        best = [(mgop.id, matches) for mgop, matches in best]
+        #best = sorted([(mgop.id, cv2.compareHist(gop.histogram, mgop.histogram, cv2.HISTCMP_CHISQR), gop.filename, mgop.filename, matches) for (mgop, matches) in best], key=lambda pair: (len(pair[2]), cv2.compareHist(gop.histogram, pair[0].histogram, cv2.HISTCMP_CHISQR), -pair[0].id), reverse=True)
+        #best = sorted([(id, cv2.compareHist(gop.histogram, Gop.get(id).histogram, cv2.HISTCMP_CHISQR), gop.filename, Gop.get(id).filename, matches) for (id, matches) in best], key=lambda pair: (len(pair[2]), cv2.compareHist(gop.histogram, Gop.get(pair[0]).histogram, cv2.HISTCMP_CHISQR), -pair[0]), reverse=True)
 
         return best
 
@@ -81,16 +119,34 @@ class Descriptor(object):
     def retrain_matcher(cls, cluster_id):
         del cls._matchers[cluster_id]
 
-    @classmethod
-    def adhoc_match(cls, descriptors1, descriptors2):
-        search_parameters = dict(checks=2)
-        index_parameters = dict(algorithm=cls.FLANN_INDEX_KDTREE, trees=1)
-        matcher = cv2.FlannBasedMatcher(index_parameters, search_parameters)
+    _matcher_fast = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    _matcher_slow = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
-        matches = matcher.knnMatch(queryDescriptors=descriptors1, trainDescriptors=descriptors2, k=2)
+    @classmethod
+    def adhoc_match(cls, descriptors1, descriptors2, fast=True):
+        if fast:
+            #search_parameters = dict(checks=2)
+            #index_parameters = dict(algorithm=cls.FLANN_INDEX_KDTREE, trees=1)
+            #matcher = cv2.FlannBasedMatcher(index_parameters, search_parameters)
+            #search_parameters = {} #dict(checks=50)
+            #index_parameters = dict(algorithm=cls.FLANN_INDEX_LSH)
+            #matcher = cv2.FlannBasedMatcher(index_parameters, search_parameters)
+            matcher = cls._matcher_fast
+            #matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        else:
+            #search_parameters = dict(checks=50)
+            #index_parameters = dict(algorithm=cls.FLANN_INDEX_KDTREE, trees=5)
+            #matcher = cv2.FlannBasedMatcher(index_parameters, search_parameters)
+            #matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+            #matches = matcher.match(descriptors1, descriptors2)
+            #return len(matches) > cls.DEFAULT_MATCHES_REQUIRED, matches
+            matcher = cls._matcher_slow
+            #matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+
+        matches = matcher.knnMatch(queryDescriptors=descriptors1.astype(np.uint8), trainDescriptors=descriptors2.astype(np.uint8), k=2)
 
         # ratio test as per Lowe's paper
-        matches = [m for m in matches if len(m) == 2]
+        matches = (m for m in matches if len(m) == 2)
         matches = [m for m, n in matches if m.distance < cls.LOWE_THRESHOLD * n.distance]
 
         return len(matches) > cls.DEFAULT_MATCHES_REQUIRED, matches

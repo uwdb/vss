@@ -4,15 +4,17 @@ import cv2
 from sklearn.cluster import *
 from sklearn.preprocessing import maxabs_scale
 from vfs.engine import VFS
-from vfs.videoio import VideoReader
+from vfs.videoio import read_first_frame
+
 
 class Histogram(object):
     BUCKETS = 2
 
     @classmethod
     def create(cls, filename, shape, codec):
-        with VideoReader(filename, shape, codec, limit=1) as reader:
-            frame = reader.read()
+        frame = read_first_frame(filename)
+        #with VideoReader(filename, shape, codec, limit=1) as reader:
+        #    frame = reader.read()
 
         assert(frame is not None)
 
@@ -22,7 +24,7 @@ class Histogram(object):
     @classmethod
     def cluster_all(cls):
         data = VFS.instance().database.execute(
-            'SELECT id, histogram FROM gops WHERE NOT histogram IS NULL').fetchall()
+            'SELECT id, histogram FROM gops WHERE NOT histogram IS NULL AND examined != 9999999').fetchall()
         if not data or len(data) == 1:
             return 0
 

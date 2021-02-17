@@ -9,28 +9,44 @@ class Gop(object):
     def add(cls, physical_video, filename, start_time, end_time, size, fps):
         gop = Gop(None, physical_video.id, filename, start_time, end_time, None, False, False, None, None, None, size, None, fps, None, None, None)
         gop.id = VFS.instance().database.execute(
-            'INSERT INTO gops(physical_id, filename, start_time, end_time, size, fps) '
-                            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                            (gop.physical_id, gop.filename, gop.start_time, gop.end_time, gop.size, gop.fps, gop.mse, gop.estimated_mse, gop.parent_id)).lastrowid
+            'INSERT INTO gops(physical_id, filename, start_time, end_time, size, fps, original_size) '
+                            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                            (gop.physical_id, gop.filename, gop.start_time, gop.end_time, gop.size, gop.fps, gop.mse, gop.estimated_mse, gop.parent_id, gop.size)).lastrowid
         return gop
 
     @classmethod
     def addmany(cls, physical_video, data):
         #TODO SQL injection :(
         VFS.instance().database.executebatch(
-            ('INSERT INTO gops(physical_id, filename, start_time, end_time, size, fps, mse, estimated_mse, parent_id) ' 
-                            "VALUES ({}, '{}', {}, {}, {}, {}, {}, {}, {})".format(
+            ('INSERT INTO gops(physical_id, filename, start_time, end_time, size, fps, mse, estimated_mse, parent_id, original_size) ' 
+                            "VALUES ({}, '{}', {}, {}, {}, {}, {}, {}, {}, {})".format(
                 physical_video.id, filename, start_time, end_time, size, fps,
-                mse if mse is not None else 'NULL', estimated_mse if estimated_mse is not None else 'NULL',
-                parent_id if parent_id is not None else 'NULL')
+                mse if mse is not None else 'NULL',
+                estimated_mse if estimated_mse is not None else 'NULL',
+                parent_id if parent_id is not None else 'NULL',
+                size)
                       for filename, start_time, end_time, size, fps, mse, estimated_mse, parent_id in data))
 
     @classmethod
     def get(cls, id):
         return Gop(*VFS.instance().database.execute(
             'SELECT id, physical_id, filename, start_time, end_time, cluster_id, joint, examined, '
-                               '       histogram, keypoints, descriptors, size, zstandard, fps, mse, estimated_mse, parent_id '
+                               '       histogram, keypoints, descriptors, size, zstandard, fps, mse, estimated_mse, parent_id, original_size '
                                'FROM gops WHERE id = ?', id).fetchone())
+
+    @classmethod
+    def get(cls, id):
+        return Gop(*VFS.instance().database.execute(
+            'SELECT id, physical_id, filename, start_time, end_time, cluster_id, joint, examined, '
+                               '       histogram, keypoints, descriptors, size, zstandard, fps, mse, estimated_mse, parent_id, original_size '
+                               'FROM gops WHERE id = ?', id).fetchone())
+
+    @classmethod
+    def get_all(cls, ids):
+        return (Gop(*args) for args in VFS.instance().database.execute(
+            'SELECT id, physical_id, filename, start_time, end_time, cluster_id, joint, examined, '
+                               '       histogram, keypoints, descriptors, size, zstandard, fps, mse, estimated_mse, parent_id, original_size '
+                               'FROM gops WHERE id IN ({})'.format(','.join(map(str, ids)))).fetchall())
 
     @classmethod
     def delete(cls, gop, references=None):
@@ -56,7 +72,7 @@ class Gop(object):
             logging.info("Not removing physical file; other references exist")
 
     def __init__(self, id, physical_id, filename, start_time, end_time, cluster_id, joint, examined, histogram, keypoints, descriptors,
-                 size, zstandard, fps, mse, estimated_mse, parent_id):
+                 size, zstandard, fps, mse, estimated_mse, parent_id, original_size):
         self.id = id
         self.physical_id = physical_id
         self.filename = filename
@@ -74,6 +90,7 @@ class Gop(object):
         self.mse = mse
         self.estimated_mse = estimated_mse
         self.parent_id = parent_id
+        self.original_size = original_size
         self._video = None
 
     def video(self):

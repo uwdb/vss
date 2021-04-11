@@ -43,6 +43,10 @@ decoders = {
     HEVC: "hevc" #"hevc_cuvid"
 }
 
+channels = {
+    RGB8: 3
+}
+
 RAW_VIDEO_MAX_GOP_SIZE = (30*3840*2160*bits_per_pixel[RGB8]) // 8
 
 _pool = ProcessPoolExecutor()

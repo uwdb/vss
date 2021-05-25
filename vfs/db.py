@@ -79,7 +79,11 @@ class Database(object):
                 logical_id integer NOT NULL REFERENCES logical_videos(id),
                 width int NOT NULL,
                 height int NOT NULL,
-                codec varchar(4) NOT NULL
+                codec varchar(4) NOT NULL,
+                gop_size int,
+                mdat_offset int,
+                filename varchar(50),
+                headers varchar(512)
                 );
         ''')
 
@@ -107,7 +111,9 @@ class Database(object):
                 estimated_mse integer,
                 parent_id integer REFERENCES gops(id),
                 original_filename varchar(50),
-                original_size integer NOT NULL
+                original_size integer NOT NULL,
+                start_byte_offset integer,
+                end_byte_offset integer
                 );
         ''')
 

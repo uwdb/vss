@@ -8,10 +8,10 @@ import vfs
 from vfs.logicalvideo import LogicalVideo
 from vfs.videoio import encoded, channels
 
-resolutions = {'4K': (2160, 3840), '2K': (1080, 1920)}
+resolutions = {'4K': (2160, 3840), '2K': (1080, 1920), '1K': (540, 960)}
 
 def load(name):
-    return Dataframe(name)
+    return Array(name)
 
 class UnitFraction(Fraction):
     def __new__(cls, *args, units=None, format=None, **kwargs):
@@ -182,11 +182,11 @@ def _to_timedelta_string(value, precision=2):
     repr = re.sub(r'(?:^|(?<=[hm]))0+([^0]+(?:\.?\d+)?[ms])', r'\1', repr) # 05m -> 5m
     return repr
 
-class Dataframe:
+class Array:
     # TODO change to new, make these immutable
-    def __init__(self, name_or_dataframe, x=None, y=None, t=None, shape=None):
-        if isinstance(name_or_dataframe, str):
-            name = name_or_dataframe
+    def __init__(self, name_or_array, x=None, y=None, t=None, shape=None):
+        if isinstance(name_or_array, str):
+            name = name_or_array
             self._shape = None
 
             if not LogicalVideo.exists_by_name(name):
@@ -197,32 +197,36 @@ class Dataframe:
                 self._y = slice(0, self.shape[1], 1) #slice(percentage(0), percentage(100), 1)
                 self._x = slice(0, self.shape[2], 1) #slice(percentage(0), percentage(100), 1)
                 self._t = slice(seconds(0), self.shape[0], self._get_spf())
-        elif isinstance(name_or_dataframe, Dataframe):
-            dataframe = name_or_dataframe
+        elif isinstance(name_or_array, Array):
+            array = name_or_array
 
-            self.video = dataframe.video
-            self._shape = shape if shape else dataframe._shape
-            divisors = dataframe._shape[1] / self._shape[1], dataframe._shape[2] / self._shape[2]
+            self.video = array.video
+            self._shape = shape if shape else array._shape
+            divisors = array._shape[1] / self._shape[1], array._shape[2] / self._shape[2]
 
-            self._t = self._slice(dataframe._t, t, self.shape[0]) #if t and t != slice(None, None, None) else dataframe._t
+            self._t = self._slice(array._t, t, self.shape[0]) #if t and t != slice(None, None, None) else array._t
 
-            #if dataframe._y != slice(Percentage(0), Percentage(100), self._get_spf()):
-            self._y = self._slice(dataframe._y, y, self.shape[1], divisors[0], cast=int) #if y and y != slice(None, None, None) else dataframe._y
+            #if array._y != slice(Percentage(0), Percentage(100), self._get_spf()):
+            self._y = self._slice(array._y, y, self.shape[1], divisors[0], cast=int) #if y and y != slice(None, None, None) else array._y
             #else:
-            #    self._y = dataframe._y
+            #    self._y = array._y
 
-            #if isinstance(dataframe._x, Percentage):
-            #if isinstance(dataframe._x, Percentage):
-            self._x = self._slice(dataframe._x, x, self.shape[2], divisors[1], cast=int) #if x and x != slice(None, None, None) else dataframe._x
+            #if isinstance(array._x, Percentage):
+            #if isinstance(array._x, Percentage):
+            self._x = self._slice(array._x, x, self.shape[2], divisors[1], cast=int) #if x and x != slice(None, None, None) else array._x
+
+            self._shape = (self._t.stop - self._t.start,
+                           self._y.stop - self._y.start,
+                           self._x.stop - self._x.start)
             #else:
-            #    self._x = dataframe._x
+            #    self._x = array._x
 
-            #x0 = dataframe.x[0] + (x[0] or 0)
-            #x1 = min(dataframe.x[1] - dataframe.x[0] - x0, x0 + x[1] - x[0])
-            #y0 = dataframe.y[0] + (y[0] or 0)
-            #y1 = min(dataframe.y[1] - dataframe.y[0] - y0, y0 + y[1] - y[0])
-            #t0 = dataframe.t[0] + (t[0] or 0)
-            #t1 = min(dataframe.t[1] - dataframe.t[0] - t0, t0 + t[1] - t[0], self.video.duration() - t0)
+            #x0 = array.x[0] + (x[0] or 0)
+            #x1 = min(array.x[1] - array.x[0] - x0, x0 + x[1] - x[0])
+            #y0 = array.y[0] + (y[0] or 0)
+            #y1 = min(array.y[1] - array.y[0] - y0, y0 + y[1] - y[0])
+            #t0 = array.t[0] + (t[0] or 0)
+            #t1 = min(array.t[1] - array.t[0] - t0, t0 + t[1] - t[0], self.video.duration() - t0)
             #self.x, self.y, self.t = (x0, x1), (y0, y1), (t0, t1)
         else:
             raise IndexError()
@@ -238,7 +242,7 @@ class Dataframe:
             raise IndexError()
         elif isinstance(address, tuple):
             t, y, x = address
-            return Dataframe(self, t=t, y=y, x=x)
+            return Array(self, t=t, y=y, x=x)
 #        elif isinstance(address, int):
 #            print(f'int {address}')
 #            return self.__getitem__((slice(None, None, None), slice(None, None, None), address))
@@ -257,7 +261,7 @@ class Dataframe:
         if isinstance(resolution, str):
             return self.at(resolutions[resolution])
         elif isinstance(resolution, tuple) and len(resolution) == 2:
-            return Dataframe(self, shape=(self.shape[0], resolution[0], resolution[1]))
+            return Array(self, shape=(self.shape[0], resolution[0], resolution[1]))
         else:
             raise IndexError()
 
@@ -305,10 +309,10 @@ class Dataframe:
         pass
 
     @staticmethod
-    def _slice(current, new, max, divisor=1, cast=lambda v: v):
+    def _slice(current, new, max_value, divisor=1, cast=lambda v: v):
         new = new or slice(None, None, None)
         #new = slice(new.start if new and new.start is not None else 0,
-        #            new.stop if new and new.stop is not None else max,
+        #            new.stop if new and new.stop is not None else max_value,
         #            new.step if new and new.step is not None else current.step)
 
         #if isinstance(current.start, Percentage):
@@ -317,8 +321,8 @@ class Dataframe:
         #    start = new.start + current.start if new.start is not None else current.start
 
         start = new.start + current.start if new.start is not None else current.start
-        #stop = min(current.stop - current.start - start, start + new.stop - (new.start or 0), max - start) if new.stop is not None else current.stop
-        stop = min(current.stop, start + new.stop - (new.start or 0), max - start) if new.stop is not None else current.stop
+        #stop = min(current.stop - current.start - start, start + new.stop - (new.start or 0), max_value - start) if new.stop is not None else current.stop
+        stop = min(current.stop, start + new.stop - (new.start or 0), max(current.stop, max_value - start)) if new.stop is not None else current.stop
         step = new.step if new.step is not None else current.step #current.step * new.step
 
         return slice(cast(start / (divisor or 1)), cast(stop / (divisor or 1)), step)
@@ -338,7 +342,7 @@ class Dataframe:
         return seconds(frames / self._get_fps())
 
     def _get_resolution(self):
-        return resolutions['4K']
+        return self.video.videos()[0].resolution() # resolutions['4K']
 
     @staticmethod
     def _slice_repr(value, min=None, max=None, default_step=1):

@@ -1,3 +1,4 @@
+from itertools import accumulate
 import logging
 import shutil
 from concurrent.futures import ProcessPoolExecutor, wait
@@ -8,6 +9,8 @@ import numpy as np
 import ffmpeg
 
 from vfs import rawcompression
+from vfs.mp4 import MP4
+from vfs import mp4
 
 H264 = "h264"
 HEVC = "hevc"
@@ -152,20 +155,28 @@ def _get_psnr_from_stderr(stderr):
     return float(str(stderr[1]).split('\\n')[-2].split('max:')[-1])
 
 
-def _write_region(input_filename, output_filename, size, offset):
+def _write_region(input_filename, output_filename, input_offset, input_length, output_offset):
     with open(output_filename, "wb") as output:
-        output.seek(offset, os.SEEK_SET)
-        if not rawcompression.is_compressed(input_filename):
+        output.seek(output_offset, os.SEEK_SET)
+        if rawcompression.is_compressed(input_filename):
+            bytes_read, bytes_written = rawcompression.decompress_file(input_filename, output)
+            assert (bytes_written == input_length)
+        elif os.path.splitext(input_filename)[-1] == '.mp4':
+            with MP4(input_filename, required_atoms='mdat') as container:
+                mp4.write_video_data(container.file, output, input_offset, input_offset + input_length, container.mdat.start)
+        else:
             with open(input_filename, 'rb') as input:
                 shutil.copyfileobj(input, output, length=1024 * 1024)
-        else:
-            bytes_read, bytes_written = rawcompression.decompress_file(input_filename, output)
-            assert (bytes_written == size)
+
+def frame_size(codec, resolution):
+    return (bits_per_pixel[codec] * np.prod(resolution)) // 8
+
 
 def read_first_frame(filename):
     success, frame = cv2.VideoCapture(filename).read()
     return frame if success else None
 
+"""
 def split_video(source_filename, output_filename_template, resolution, codec, fps, loglevel='error'):
     if encoded[codec]:
         return split_encoded_video(source_filename, output_filename_template, codec, loglevel)
@@ -206,49 +217,90 @@ def split_raw_video(source_filename, output_filename_template, resolution, codec
             for (filename, start_time, end_time)
             in map(lambda row: row.split(','),
                    stream.stdout.raw.readall().decode('utf-8').strip().split('\n')))
+"""
 
-def join_video(input_filenames, output_filename, resolution, codec, input_sizes=None, loglevel='error'):
+def join_video(segments, output_filename, resolution, codec, loglevel='error'):
     if encoded[codec]:
-        join_encoded(input_filenames, output_filename, loglevel=loglevel)
+        join_encoded(segments, output_filename, resolution, codec)
     else:
-        join_raw(input_filenames, output_filename, resolution, codec, input_sizes=input_sizes, loglevel=loglevel)
+        join_raw(segments, output_filename, resolution, codec, loglevel=loglevel)
 
-def join_encoded(input_filenames, output_filename, loglevel='error'):
+def join_encoded(segments, output_filename, resolution, codec):
+    assert(len(segments) > 0)
+    headers_written = [False]
+
+    def write_headers(group):
+        if headers_written[0]:
+            pass
+        elif group.requires_transcode:
+            output.write(container.headers)
+        else:
+            output.write(group[0].video().headers)
+        headers_written[0] = True
+
+    with open(output_filename, 'wb') as output:
+        for segment in segments:
+            if segment.requires_transcode:
+                with MP4(segment.transcode_filename, required_atoms=[b'mdat', b'avcC']) as container:
+                    write_headers(segment)
+                    mp4.write_video_data(container.file, output, 0, container.mdat.size, container.mdat.start)
+            else:
+                video = segment[0].video()
+
+                assert(video.codec == codec)
+                assert(video.resolution() == resolution)
+
+                write_headers(segment)
+                with open(video.filename, 'rb') as input:
+                    mp4.write_video_data(input, output, segment[0].start_byte_offset, segment[-1].end_byte_offset, video.mdat_offset)
+
+def join_encoded_old(input_filenames, output_filename, loglevel='error'):
     (ffmpeg
       .input('concat:{}'.format('|'.join(input_filenames)))
       .output(output_filename, c='copy', loglevel=loglevel)
       .overwrite_output()
       .run())
 
-def join_raw(input_filenames, output_filename, resolution, codec, input_sizes=None, verify_inputs=False, loglevel='error'):
-    if verify_inputs:
+def join_raw(segments, output_filename, resolution, codec, verify_inputs=False, loglevel='error'):
+    if False and len(segments) == 1:
+        shutil.copyfile(segments[0].filename, output_filename)
+    elif verify_inputs:
         # Attempting to concat a compressed input file
-        assert(all(not rawcompression.is_compressed(filename) for filename in input_filenames))
+        assert(all(not rawcompression.is_compressed(s.filename) for s in segments))
 
         (ffmpeg
-          .input('concat:{}'.format('|'.join(input_filenames)),
+          .input('concat:{}'.format('|'.join(s.filename for s in segments)),
                  s=_size(resolution),
                  pix_fmt=pixel_formats[codec])
           .output(output_filename, c='copy', loglevel=loglevel)
           .overwrite_output()
           .run())
-    elif input_sizes is None:
+    elif False:
+        print([s.filename for s in segments])
         # Don't verify inputs, just concat everything
         with open(output_filename, 'wb') as output:
-            for filename in input_filenames:
-                if not rawcompression.is_compressed(filename):
-                    with open(filename, 'rb') as input:
+            for segment in segments:
+                if not rawcompression.is_compressed(segment.filename):
+                    with open(segment.filename, 'rb') as input:
                         shutil.copyfileobj(input, output)
                 else:
-                    rawcompression.decompress_file(filename, output)
+                    rawcompression.decompress_file(segment.filename, output)
     else:
+        def _get_data_size(filename):
+            if os.path.splitext(filename)[-1] == 'mp4':
+                with MP4(filename, required_atoms=['mdat']) as mp4:
+                    return mp4.mdat.start, mp4.mdat.size
+            else:
+                return 0, os.path.getsize(filename)
+
         # Use multiple threads to write to same file
-        assert(len(input_filenames) == len(input_sizes))
-
         futures = []
+        input_offsets, input_lengths = zip(*(_get_data_size(s.filename) for s in segments))
+        output_offsets = list(accumulate(input_lengths))
 
-        for i, (filename, size) in enumerate(zip(input_filenames, input_sizes)):
-            futures.append(_pool.submit(_write_region, filename, output_filename, size, sum(input_sizes[:i])))
+        for segment, input_offset, input_length, output_offset in zip(segments, input_offsets, input_lengths, output_offsets):
+            #futures.append(_pool.submit(_write_region, segment.filename, output_filename, os.path.getsize(segment.filename), sum(input_sizes[:i])))
+            futures.append(_pool.submit(_write_region, segment.filename, output_filename, input_offset, input_length, output_offset))
         wait(futures)
         assert(all(f.result() is None for f in futures))
 
@@ -388,20 +440,28 @@ def reformat_raw_subframe(input_filename, output_filename, input_resolution, roi
 
     return 0
 
+"""
 def get_shape(filename):
-    probe = ffmpeg.probe(filename)
-    assert(len(probe['streams']) == 1)
+    with MP4(filename) as mp4:
+        return (mp4.height, mp4.width), mp4
 
-    stream = probe['streams'][0]
-    return stream['height'], stream['width']
+    #probe = ffmpeg.probe(filename)
+    #assert(len(probe['streams']) == 1)
+
+    #stream = probe['streams'][0]
+    #return stream['height'], stream['width']
 
 def get_shape_and_codec(filename):
-    probe = ffmpeg.probe(filename)
-    assert(len(probe['streams']) == 1)
+    with MP4(filename) as mp4:
+        return (mp4.height, mp4.width), mp4.codec, mp4.fps, mp4
 
-    stream = probe['streams'][0]
-    fps_ratio = list(map(int, stream['r_frame_rate'].split('/')))
-    return (stream['height'], stream['width']), stream['codec_name'], fps_ratio[0] / fps_ratio[1]
+    #probe = ffmpeg.probe(filename)
+    #assert(len(probe['streams']) == 1)
+
+    #stream = probe['streams'][0]
+    #fps_ratio = list(map(int, stream['r_frame_rate'].split('/')))
+    #return (stream['height'], stream['width']), stream['codec_name'], fps_ratio[0] / fps_ratio[1]
+"""
 
 def compute_mse(reference_gop, target_gop):
     if encoded[reference_gop.video().codec]:

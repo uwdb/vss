@@ -130,7 +130,7 @@ class VFS(object):
                 while instance.running:
                     if len(futures) < pool_size:
                         physical_id, gop_id, filename, height, width, codec = (instance.database.execute(
-                            'SELECT physical_id, gops.id, filename, height, width, codec FROM gops '
+                            'SELECT physical_id, gops.id, physical_videos.filename, height, width, codec FROM gops '
                             'INNER JOIN physical_videos '
                             '  ON gops.physical_id = physical_videos.id '
                             'WHERE examined = 0 AND joint = 0 AND histogram IS NULL AND '

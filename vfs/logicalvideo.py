@@ -51,7 +51,7 @@ class LogicalVideo(object):
         if self._videos is None:
             self._videos = list(map(lambda args: PhysicalVideo(*args),
                        VFS.instance().database.execute(
-                           'SELECT id, logical_id, height, width, codec FROM physical_videos WHERE logical_id = ?', self.id).fetchall()))
+                           'SELECT id, logical_id, height, width, codec, filename, headers, gop_size, mdat_offset FROM physical_videos WHERE logical_id = ?', self.id).fetchall()))
         return self._videos
 
     def duration(self):

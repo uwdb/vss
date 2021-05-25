@@ -39,7 +39,7 @@ def read(name, filename=None, resolution=None, roi=None, t=None, codec=None, fps
             logical = LogicalVideo.get_by_name(name)
 
             t = tuple(map(float, t)) if t is not None else (0, logical.duration())
-            resolution = resolution or ((roi[2] - roi[0], roi[3] - roi[1]) if roi else next(logical.videos()).resolution())
+            resolution = resolution or ((roi[2] - roi[0], roi[3] - roi[1]) if roi else next(iter(logical.videos())).resolution())
             codec = codec or H264
 
             gops = vfs.solver.solve(logical, resolution, roi, t, fps, codec)

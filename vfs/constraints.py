@@ -5,7 +5,6 @@ from collections import defaultdict
 import z3
 import itertools
 from vfs.videoio import encoded
-# import random
 
 
 #KEYFRAME_COST = 5

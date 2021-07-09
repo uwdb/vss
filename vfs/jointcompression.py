@@ -5,7 +5,8 @@ import logging
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import cv2
-from skimage.measure import compare_ssim
+#from skimage.measure import compare_ssim
+from skimage import measure
 
 from vfs.videoio import VideoReader, VideoWriter, NullReader, NullWriter, read_first_frame
 from vfs.engine import VFS
@@ -218,11 +219,11 @@ class JointCompression(object):
 
         cv2.copyTo(raw_alpha, left_mask, distance_left)
 
-"""
+        """
         rawAlpha.copyTo(dist1Masked,noMask);    // edited: where no mask is set, blend with equal values
         dist1.copyTo(dist1Masked,mask1);
         rawAlpha.copyTo(dist1Masked,mask1&(255-mask2)); //edited
-"""
+        """
 
     @classmethod
     def interlace_join(cls):

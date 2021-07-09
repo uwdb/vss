@@ -124,7 +124,7 @@ def reconstruct(output_filename, logical, gops, resolution, roi, times, fps, cod
 
         VFS.instance().database.execute('UPDATE gops SET clock=? WHERE id IN ({})'.format(','.join(str(g.id) for g in gops)), clock)
 
-        if is_stream and len(segments) == 1 and (times is None or times == (segments[0].video.start_time(), segments[0].video.end_time())):
+        if is_stream and len(segments) == 1 and not has_transcode and (times is None or times == (segments[0].video.start_time(), segments[0].video.end_time())):
             # We're streaming, so just use the already-stored physical video file
             output_filename = segments[0].video.filename
         elif is_stream and len(segments) == 1:

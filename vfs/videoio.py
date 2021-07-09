@@ -276,7 +276,6 @@ def join_raw(segments, output_filename, resolution, codec, verify_inputs=False, 
           .overwrite_output()
           .run())
     elif True:
-        print([s.filename for s in segments])
         # Don't verify inputs, just concat everything
         with open(output_filename, 'wb') as output:
             for segment in segments:

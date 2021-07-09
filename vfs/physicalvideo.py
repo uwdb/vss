@@ -75,6 +75,7 @@ class PhysicalVideo(object):
             shutil.move(filename, output_filename)
 
         VFS.instance().database.execute("UPDATE physical_videos SET filename=? WHERE id = ?", (output_filename, physical.id))
+        physical.filename = output_filename
 
 
         Gop.addmany(physical, [(filename, start_time, end_time, start_byte_offset, end_byte_offset, os.path.getsize(output_filename), fps, 0, 0, None)

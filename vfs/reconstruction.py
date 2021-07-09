@@ -125,9 +125,16 @@ def reconstruct(output_filename, logical, gops, resolution, roi, times, fps, cod
         VFS.instance().database.execute('UPDATE gops SET clock=? WHERE id IN ({})'.format(','.join(str(g.id) for g in gops)), clock)
 
         if is_stream and len(segments) == 1 and (times is None or times == (segments[0].video.start_time(), segments[0].video.end_time())):
+            # We're streaming, so just use the already-stored physical video file
             output_filename = segments[0].video.filename
+        elif is_stream and len(segments) == 1:
+            # We only have one segment, so no need to join.  Just cache and stream the new physical video file.
+            cache_reconstructions(logical, resolution, codec, times, fps,
+                                  (segment for segment in segments if segment.requires_transcode))
+            output_filename = segments[0].physical.filename
         else:
-            vfs.videoio.join_video(segments, output_filename, resolution, codec) #, input_sizes=sizes)
+            # Need to join and cache
+            vfs.videoio.join_video(segments, output_filename, resolution, codec)
 
             cache_reconstructions(logical, resolution, codec, times, fps,
                                   (segment for segment in segments if segment.requires_transcode))
@@ -151,4 +158,5 @@ def cache_reconstructions(logical, resolution, codec, times, fps, cache_sequence
                  for (id, current_estimated_mse) in transitive_estimated_mses]
         VFS.instance().database.executebatch(batch)
 
+        sequence.physical = physical
         logging.info('Cached physical video %s-%d', logical.name, physical.id)

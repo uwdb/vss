@@ -47,8 +47,7 @@ def read(name, filename=None, resolution=None, roi=None, t=None, codec=None, fps
             if filename is not None:
                 vfs.reconstruction.reconstruct(filename, logical, gops, resolution, roi, t, fps, codec)
             else:
-                filename = os.path.join(tempfile.gettempdir(), uuid.uuid4().hex + ".mp4")
-                result_filename = vfs.reconstruction.reconstruct(filename, logical, gops, resolution, roi, t, fps, codec, is_stream=True)
+                result_filename = vfs.reconstruction.reconstruct(None, logical, gops, resolution, roi, t, fps, codec, is_stream=True)
                 return open(result_filename, 'rb') if not child_process else result_filename
     else:
         print("ERROR: video does not exist")

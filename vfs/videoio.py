@@ -262,7 +262,7 @@ def join_encoded_old(input_filenames, output_filename, loglevel='error'):
       .run())
 
 def join_raw(segments, output_filename, resolution, codec, verify_inputs=False, loglevel='error'):
-    if False and len(segments) == 1:
+    if len(segments) == 1:
         shutil.copyfile(segments[0].filename, output_filename)
     elif verify_inputs:
         # Attempting to concat a compressed input file
@@ -275,7 +275,7 @@ def join_raw(segments, output_filename, resolution, codec, verify_inputs=False, 
           .output(output_filename, c='copy', loglevel=loglevel)
           .overwrite_output()
           .run())
-    elif False:
+    elif True:
         print([s.filename for s in segments])
         # Don't verify inputs, just concat everything
         with open(output_filename, 'wb') as output:
@@ -351,7 +351,7 @@ def reformat_encoded_transcode(input_filename, output_filename, input_resolution
 
     if roi is not None and roi != (0, 0, *input_resolution): #*output_resolution):
         op = op.crop(*_crop(roi))
-    if input_resolution != output_resolution:
+    if input_resolution != output_resolution and (roi is None or output_resolution != (roi[2] - roi[0], roi[3] - roi[1])):
         op = op.filter('scale', output_resolution[1], output_resolution[0])
 
 #    if times:

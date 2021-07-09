@@ -59,7 +59,7 @@ The `load` operation is used to retrieve video data from VSS as a Numpy-like arr
 Each 3D VSS array supports spatial (i.e., to select a region of interest) or temporal (i.e., to select a time range) slicing.  Slice steps also enable downsampling (by stepping over the spatial dimensions) and framerate adjustments (by stepping over the temporal dimension).
 
 Operations such as slicing are lazily applied to VSS arrays.
-Once the desired data has been selected, a developer converts a VSS array into a Numpy array using the `to_array()` method.  This method invokes the lower-level API (described below) to retrieve the requested video data and transforms it into a Numpy array.
+Once the desired data has been selected, a developer converts a VSS array into a Numpy array using the `to_numpy()` method.  This method invokes the lower-level API (described below) to retrieve the requested video data and transforms it into a Numpy array.
 
 Some simple examples:
 
@@ -75,7 +75,7 @@ with vss.engine.VSS(transient=True):
     array = array[:, 0:50, 0:50] # Select the top-left 50x50 region of the downsampled video
     array = array[:, :, ::30]    # Sample at 30FPS
 
-    numpy_array = array.to_array() # Materialize as a 3x50x50x1 Numpy array (3-channel RGB, t, y, x)
+    numpy_array = array.to_numpy() # Materialize as a 3x50x50x1 Numpy array (3-channel RGB, t, y, x)
 ```
 
 More examples are available in the [VSS array tests](https://github.com/BrandonHaynes/vss/tree/master/tests/test_array.py).
